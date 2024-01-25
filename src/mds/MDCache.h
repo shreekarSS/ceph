@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "common/DecayCounter.h"
+#include "common/MemoryModel.h"
 #include "include/common_fwd.h"
 #include "include/types.h"
 #include "include/filepath.h"
@@ -663,7 +664,7 @@ class MDCache {
   bool expire_recursive(CInode *in, expiremap& expiremap);
 
   void trim_client_leases();
-  void check_memory_usage();
+  void check_memory_usage(const MemoryModel::snap &baseline);
 
   void shutdown_start();
   void shutdown_check();
