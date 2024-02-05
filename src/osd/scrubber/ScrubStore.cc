@@ -11,6 +11,11 @@ using std::string;
 using std::vector;
 
 using ceph::bufferlist;
+#define dout_context (m_osds->cct)
+#define dout_subsys ceph_subsys_osd
+#undef dout_prefix
+#define dout_prefix _prefix(_dout, this)
+
 
 namespace {
 ghobject_t make_scrub_object(const spg_t& pgid)
@@ -133,7 +138,13 @@ void Store::add_object_error(int64_t pool, const inconsistent_obj_wrapper& e)
 {
   bufferlist bl;
   e.encode(bl);
-  results[to_object_key(pool, e.object)] = bl;
+  if (e.is_deep_error()) {
+	  dout(10) << "inside add object errror deep"<< e.object << "pool" << pool << dendl;
+      deep_results[to_object_key(pool, e.object)] = bl;
+  } else { // Otherwise, it's a shallow error
+  	  dout(10) << "inside add object errror shallow"<< e.object << "pool" << pool << dendl;
+    shallow_results[to_object_key(pool, e.object)] = bl;
+  }
 }
 
 void Store::add_error(int64_t pool, const inconsistent_snapset_wrapper& e)
@@ -150,18 +161,23 @@ void Store::add_snap_error(int64_t pool, const inconsistent_snapset_wrapper& e)
 
 bool Store::empty() const
 {
-  return results.empty();
+  return shallow_results.empty() && deep_results.empty() && results.empty();
 }
 
-void Store::flush(ObjectStore::Transaction* t)
-{
-  if (t) {
-    OSDriver::OSTransaction txn = driver.get_transaction(t);
-    backend.set_keys(results, &txn);
+void Store::flush(ObjectStore::Transaction* t) {
+    if (t) {
+      OSDriver::OSTransaction txn = driver.get_transaction(t);
+      // Flush shallow and deep object errors
+      backend.set_keys(shallow_results, &txn);
+      backend.set_keys(deep_results, &txn);
+      // Flush common snapshot errors
+      backend.set_keys(results, &txn);
+    }
+    // Clear all maps after flushing
+    shallow_results.clear();
+    deep_results.clear();
+    results.clear();
   }
-  results.clear();
-}
-
 void Store::cleanup(ObjectStore::Transaction* t)
 {
   t->remove(coll, hoid);

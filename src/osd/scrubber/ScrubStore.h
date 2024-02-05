@@ -29,7 +29,6 @@ class Store {
   // and a variant-friendly interface:
   void add_error(int64_t pool, const inconsistent_obj_wrapper& e);
   void add_error(int64_t pool, const inconsistent_snapset_wrapper& e);
-
   bool empty() const;
   void flush(ObjectStore::Transaction*);
   void cleanup(ObjectStore::Transaction*);
@@ -57,6 +56,11 @@ class Store {
   OSDriver driver;
   mutable MapCacher::MapCacher<std::string, ceph::buffer::list> backend;
   std::map<std::string, ceph::buffer::list> results;
+  std::map<std::string, ceph::buffer::list> shallow_results;
+  std::map<std::string, ceph::buffer::list> deep_results;
+ protected:
+  OSDService* const m_osds;
+  
 };
 }  // namespace Scrub
 
