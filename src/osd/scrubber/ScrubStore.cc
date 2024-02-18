@@ -5,23 +5,25 @@
 #include "osd/osd_types.h"
 #include "common/scrub_types.h"
 #include "include/rados/rados_types.hpp"
+#include "common/debug.h" 
 
 using std::ostringstream;
 using std::string;
 using std::vector;
 
 using ceph::bufferlist;
-#define dout_context (m_osds->cct)
-#define dout_subsys ceph_subsys_osd
-#undef dout_prefix
-#define dout_prefix _prefix(_dout, this)
 
+#define dout_context g_ceph_context // Use the global Ceph context
+#define dout_subsys ceph_subsys_osd // Use the OSD subsystem for debug output
+
+// Define dout_prefix if needed
+#define dout_prefix *_dout
 
 namespace {
-ghobject_t make_scrub_object(const spg_t& pgid)
+ghobject_t make_scrub_object(const spg_t& pgid, bool deep = false)
 {
   ostringstream ss;
-  ss << "scrub_" << pgid;
+  ss << (deep ? "deep_scrub_" : "scrub_") << pgid;
   return pgid.make_temp_ghobject(ss.str());
 }
 
@@ -113,15 +115,21 @@ Store::create(ObjectStore* store,
   ceph_assert(store);
   ceph_assert(t);
   ghobject_t oid = make_scrub_object(pgid);
+  ghobject_t deep_oid = make_scrub_object(pgid, true);
   t->touch(coll, oid);
-  return new Store{coll, oid, store};
+  t->touch(coll, deep_oid);
+
+  return new Store{coll, oid, deep_oid, store};
 }
 
-Store::Store(const coll_t& coll, const ghobject_t& oid, ObjectStore* store)
+Store::Store(const coll_t& coll, const ghobject_t& oid, const ghobject_t& deep_oid, ObjectStore* store)
   : coll(coll),
     hoid(oid),
+    deep_hoid(deep_oid),
     driver(store, coll, hoid),
-    backend(&driver)
+    deep_driver(store, coll, deep_oid),
+    backend(&driver),
+    deep_backend(&deep_driver)
 {}
 
 Store::~Store()
@@ -138,12 +146,14 @@ void Store::add_object_error(int64_t pool, const inconsistent_obj_wrapper& e)
 {
   bufferlist bl;
   e.encode(bl);
-  if (e.is_deep_error()) {
-	  dout(10) << "inside add object errror deep"<< e.object << "pool" << pool << dendl;
-      deep_results[to_object_key(pool, e.object)] = bl;
-  } else { // Otherwise, it's a shallow error
-  	  dout(10) << "inside add object errror shallow"<< e.object << "pool" << pool << dendl;
-    shallow_results[to_object_key(pool, e.object)] = bl;
+  if (e.has_deep_errors()) {
+    deep_results[to_object_key(pool, e.object)] = bl;
+    dout(10) << "Debug message here" << dendl;
+
+  } else {
+    results[to_object_key(pool, e.object)] = bl;
+    dout(10) << "Debug message here too" << dendl;
+
   }
 }
 
@@ -161,26 +171,31 @@ void Store::add_snap_error(int64_t pool, const inconsistent_snapset_wrapper& e)
 
 bool Store::empty() const
 {
-  return shallow_results.empty() && deep_results.empty() && results.empty();
+  return results.empty() and deep_results.empty();
 }
 
-void Store::flush(ObjectStore::Transaction* t) {
-    if (t) {
-      OSDriver::OSTransaction txn = driver.get_transaction(t);
-      // Flush shallow and deep object errors
-      backend.set_keys(shallow_results, &txn);
-      backend.set_keys(deep_results, &txn);
-      // Flush common snapshot errors
-      backend.set_keys(results, &txn);
-    }
-    // Clear all maps after flushing
-    shallow_results.clear();
-    deep_results.clear();
-    results.clear();
-  }
-void Store::cleanup(ObjectStore::Transaction* t)
+void Store::flush(ObjectStore::Transaction* t)
 {
-  t->remove(coll, hoid);
+  
+  if (t) {
+
+    OSDriver::OSTransaction txn = driver.get_transaction(t);
+    backend.set_keys(results, &txn);
+
+    OSDriver::OSTransaction deep_txn = deep_driver.get_transaction(t);
+    deep_backend.set_key(deep_results, &deep_txn);
+
+  }
+  results.clear();
+  deep_results.clear();
+}
+
+void Store::cleanup(ObjectStore::Transaction* t, bool is_deep_scrub)
+{
+  t->remove(coll, hoid); ; // Always clear the shallow error database
+  if (is_deep_scrub){
+      t->remove(coll, deep_hoid);  // For deep scrubs, also clear the deep error database
+  }
 }
 
 std::vector<bufferlist>

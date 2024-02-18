@@ -1128,7 +1128,8 @@ void PgScrubber::cleanup_store(ObjectStore::Transaction* t)
     {}
     void finish(int) override {}
   };
-  m_store->cleanup(t);
+  
+  m_store->cleanup(t, m_is_deep);
   t->register_on_complete(new OnComplete(std::move(m_store)));
   ceph_assert(!m_store);
 }
@@ -1149,7 +1150,7 @@ void PgScrubber::on_init()
     m_is_repair,
     m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow,
     m_pg->get_actingset());
-
+    
   //  create a new store
   {
     ObjectStore::Transaction t;
