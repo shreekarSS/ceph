@@ -501,43 +501,6 @@ void PgScrubber::rm_from_osd_scrubbing()
   }
 }
 
-sched_params_t PgScrubber::determine_scrub_time(
-    const pool_opts_t& pool_conf) const
-{
-  sched_params_t res;
-
-  if (m_planned_scrub.must_scrub || m_planned_scrub.need_auto) {
-
-    // Set the smallest time that isn't utime_t()
-    res.proposed_time = PgScrubber::scrub_must_stamp();
-    res.is_must = Scrub::must_scrub_t::mandatory;
-    // we do not need the interval data in this case
-
-  } else if (
-      m_pg->info.stats.stats_invalid &&
-      get_pg_cct()->_conf->osd_scrub_invalid_stats) {
-    res.proposed_time = ceph_clock_now();
-    res.is_must = Scrub::must_scrub_t::mandatory;
-
-  } else {
-    res.proposed_time = m_pg->info.history.last_scrub_stamp;
-    res.min_interval = pool_conf.value_or(pool_opts_t::SCRUB_MIN_INTERVAL, 0.0);
-    res.max_interval = pool_conf.value_or(pool_opts_t::SCRUB_MAX_INTERVAL, 0.0);
-  }
-
-  dout(15)
-      << fmt::format(
-	     "{}: suggested: {:s} hist: {:s} v:{}/{} must:{} pool-min:{} {}",
-	     __func__, res.proposed_time, m_pg->info.history.last_scrub_stamp,
-	     (bool)m_pg->info.stats.stats_invalid,
-	     get_pg_cct()->_conf->osd_scrub_invalid_stats,
-	     (res.is_must == must_scrub_t::mandatory ? "y" : "n"),
-	     res.min_interval, m_planned_scrub)
-      << dendl;
-  return res;
-}
-
-
 /*
  * Note: referring to m_planned_scrub here is temporary, as this set of
  * scheduling flags will be removed in a followup PR.
@@ -550,7 +513,8 @@ void PgScrubber::schedule_scrub_with_osd()
   auto pre_state = m_scrub_job->state_desc();
   auto pre_reg = registration_state();
 
-  auto suggested = determine_scrub_time(m_pg->get_pgpool().info.opts);
+  auto suggested = m_osds->get_scrub_services().determine_scrub_time(
+      m_planned_scrub, m_pg->info, m_pg->get_pgpool().info.opts);
   m_osds->get_scrub_services().register_with_osd(m_scrub_job, suggested);
 
   dout(10) << fmt::format(
@@ -590,7 +554,8 @@ void PgScrubber::update_scrub_job(const requested_scrub_t& request_flags)
 
   if (is_primary() && m_scrub_job) {
     ceph_assert(m_pg->is_locked());
-    auto suggested = determine_scrub_time(m_pg->get_pgpool().info.opts);
+    auto suggested = m_osds->get_scrub_services().determine_scrub_time(
+	request_flags, m_pg->info, m_pg->get_pgpool().info.opts);
     m_osds->get_scrub_services().update_job(m_scrub_job, suggested, true);
     m_pg->publish_stats_to_osd();
   }
@@ -606,12 +571,11 @@ scrub_level_t PgScrubber::scrub_requested(
   const bool deep_requested = (scrub_level == scrub_level_t::deep) ||
 			      (scrub_type == scrub_type_t::do_repair);
   dout(10) << fmt::format(
-		  "{}: {}{} scrub requested. "
-		  "@entry:{},last-stamp:{:s},Registered?{}",
+		  "{}: {} {} scrub requested. Prev stamp: {}. Registered? {}",
 		  __func__,
-		  (scrub_type == scrub_type_t::do_repair ? "repair + "
-							 : "not-repair + "),
-		  (deep_requested ? "deep" : "shallow"), req_flags,
+		  (scrub_type == scrub_type_t::do_repair ? " repair + "
+							 : " not-repair + "),
+		  (deep_requested ? "deep" : "shallow"),
 		  m_scrub_job->get_sched_time(), registration_state())
 	   << dendl;
 
@@ -621,6 +585,7 @@ scrub_level_t PgScrubber::scrub_requested(
   // User might intervene, so clear this
   req_flags.need_auto = false;
   req_flags.req_scrub = true;
+
   dout(20) << fmt::format("{}: planned scrub:{}", __func__, req_flags) << dendl;
 
   update_scrub_job(req_flags);
@@ -1163,13 +1128,14 @@ void PgScrubber::cleanup_store(ObjectStore::Transaction* t)
     {}
     void finish(int) override {}
   };
-  m_store->cleanup(t);
+  m_store->cleanup(t, m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow);
   t->register_on_complete(new OnComplete(std::move(m_store)));
   ceph_assert(!m_store);
 }
 
 void PgScrubber::on_init()
 {
+
   // going upwards from 'inactive'
   ceph_assert(!is_scrub_active());
   m_pg->reset_objects_scrubbed();
@@ -1184,7 +1150,7 @@ void PgScrubber::on_init()
     m_is_repair,
     m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow,
     m_pg->get_actingset());
-
+    
   //  create a new store
   {
     ObjectStore::Transaction t;
@@ -1366,9 +1332,11 @@ void PgScrubber::repair_oinfo_oid(ScrubMap& smap)
     if (o.attrs.find(OI_ATTR) == o.attrs.end()) {
       continue;
     }
+    bufferlist bl;
+    bl.push_back(o.attrs[OI_ATTR]);
     object_info_t oi;
     try {
-      oi.decode(o.attrs[OI_ATTR]);
+      oi.decode(bl);
     } catch (...) {
       continue;
     }
@@ -1383,12 +1351,13 @@ void PgScrubber::repair_oinfo_oid(ScrubMap& smap)
         << "...repaired";
       // Fix object info
       oi.soid = hoid;
-      bufferlist bl;
+      bl.clear();
       encode(oi,
              bl,
              m_pg->get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
 
-      o.attrs[OI_ATTR] = std::move(bl);
+      bufferptr bp(bl.c_str(), bl.length());
+      o.attrs[OI_ATTR] = bp;
 
       t.setattr(m_pg->coll, ghobject_t(hoid), OI_ATTR, bl);
       int r = m_pg->osd->store->queue_transaction(m_pg->ch, std::move(t));

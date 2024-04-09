@@ -35,27 +35,18 @@ class Store {
   std::vector<ceph::buffer::list> get_snap_errors(
     int64_t pool,
     const librados::object_id_t& start,
-    uint64_t max_return,
-    bool isScrubActive,
-    bool isDeep
-    ) const;
+    uint64_t max_return) const;
 
   std::vector<ceph::buffer::list> get_object_errors(
     int64_t pool,
     const librados::object_id_t& start,
-    uint64_t max_return,
-    bool isScrubActive,
-    bool isDeep
-    ) const;
+    uint64_t max_return) const;
 
  private:
   Store(const coll_t& coll, const ghobject_t& oid, const ghobject_t& deep_oid, ObjectStore* store);
   std::vector<ceph::buffer::list> get_errors(const std::string& start,
 					     const std::string& end,
-					     uint64_t max_return,
-               bool isScrubActive,
-               bool isDeep
-               ) const;
+					     uint64_t max_return) const;
  private:
   const coll_t coll;
   const ghobject_t hoid;
@@ -68,7 +59,7 @@ class Store {
   mutable MapCacher::MapCacher<std::string, ceph::buffer::list> deep_backend;
   std::map<std::string, ceph::buffer::list> results;
   std::map<std::string, ceph::buffer::list> deep_results;
-
+  bool store_modified_ = false;
 };
 }  // namespace Scrub
 
